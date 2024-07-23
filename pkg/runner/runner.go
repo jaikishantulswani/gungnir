@@ -19,14 +19,7 @@ import (
 )
 
 var (
-	logListUrl          = "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
-	defaultRateLimitMap = map[string]time.Duration{
-		"Google":        time.Millisecond * 1,
-		"Sectigo":       time.Second * 4,
-		"Let's Encrypt": time.Second * 1,
-		"DigiCert":      time.Second * 1,
-		"TrustAsia":     time.Second * 1,
-	}
+	logListUrl = "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
 )
 
 type Runner struct {
@@ -39,7 +32,6 @@ type Runner struct {
 
 func NewRunner(options *Options) (*Runner, error) {
 	var err error
-	// Parse Options
 	runner := &Runner{options: options}
 
 	// Load root domains if any
@@ -55,7 +47,6 @@ func NewRunner(options *Options) (*Runner, error) {
 		for scanner.Scan() {
 			runner.rootDomains[scanner.Text()] = true
 		}
-
 	}
 
 	// Collect CT Logs
@@ -66,8 +57,15 @@ func NewRunner(options *Options) (*Runner, error) {
 
 	runner.entryTasksChan = make(chan types.EntryTask, len(runner.logClients)*100)
 
-	// Copy rate limit map
-	runner.rateLimitMap = defaultRateLimitMap
+	// Set rate limit map based on the new argument
+	rateLimit := time.Duration(options.RateLimit) * time.Second
+	runner.rateLimitMap = map[string]time.Duration{
+		"Google":        rateLimit,
+		"Sectigo":       rateLimit,
+		"Let's Encrypt": rateLimit,
+		"DigiCert":      rateLimit,
+		"TrustAsia":     rateLimit,
+	}
 
 	return runner, nil
 }
@@ -86,7 +84,11 @@ func (r *Runner) Run() {
 	}()
 
 	// Parsing results workers
-	for i := 0; i < len(r.logClients); i++ {
+	concurrency := r.options.Concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	for i := 0; i < concurrency; i++ {
 		wg.Add(1) // Don't forget to add to the WaitGroup for each worker
 		go func() {
 			defer wg.Done()
@@ -122,7 +124,7 @@ func (r *Runner) entryWorker(ctx context.Context) {
 func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	tickerDuration := time.Second // Default duration
+	tickerDuration := time.Duration(1 * time.Second) // Default duration
 	for key := range r.rateLimitMap {
 		if strings.Contains(ctl.Name, key) {
 			tickerDuration = r.rateLimitMap[key]
@@ -130,7 +132,7 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 		}
 	}
 
-	// Is this a google log?
+	// Is this a Google log?
 	IsGoogleLog := strings.Contains(ctl.Name, "Google")
 
 	ticker := time.NewTicker(tickerDuration)
@@ -182,7 +184,7 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 				continue
 			}
 
-			// Work with google logs
+			// Work with Google logs
 			if IsGoogleLog {
 				for start < end {
 					batchEnd := start + 32
@@ -213,7 +215,7 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 					}
 				}
 				continue // Continue with the outer loop.
-			} else { // Non Google handler
+			} else { // Non-Google handler
 				entries, err := ctl.Client.GetRawEntries(ctx, start, end)
 				if err != nil {
 					if r.options.Verbose {
@@ -314,8 +316,6 @@ func (r *Runner) logCertInfo(entry *ct.RawLogEntry) {
 	}
 }
 
-// Prints out a short bit of info about |precert|, found at |index| in the
-// specified log
 func (r *Runner) logPrecertInfo(entry *ct.RawLogEntry) {
 	parsedEntry, err := entry.ToLogEntry()
 	if x509.IsFatal(err) || parsedEntry.Precert == nil {
