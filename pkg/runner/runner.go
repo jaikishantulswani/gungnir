@@ -28,14 +28,18 @@ type Runner struct {
 	rootDomains    map[string]bool
 	rateLimitMap   map[string]time.Duration
 	entryTasksChan chan types.EntryTask
+	seenDomains    map[string]bool // Added seenDomains map
 }
 
 func NewRunner(options *Options) (*Runner, error) {
 	var err error
-	runner := &Runner{options: options}
+	runner := &Runner{
+		options:     options,
+		rootDomains: map[string]bool{},
+		seenDomains: map[string]bool{}, // Initialize seenDomains
+	}
 
 	// Load root domains if any
-	runner.rootDomains = map[string]bool{}
 	if runner.options.RootList != "" {
 		file, err := os.Open(runner.options.RootList)
 		if err != nil {
@@ -281,13 +285,25 @@ func (r *Runner) logCertInfo(entry *ct.RawLogEntry) {
 	if x509.IsFatal(err) || parsedEntry.X509Cert == nil {
 		log.Printf("Process cert at index %d: <unparsed: %v>", entry.Index, err)
 	} else {
+		printed := false
 		if len(r.rootDomains) == 0 {
 			if r.options.JsonOutput {
 				utils.JsonOutput(parsedEntry.X509Cert)
 			} else {
-				fmt.Println(parsedEntry.X509Cert.Subject.CommonName)
+				if _, seen := r.seenDomains[parsedEntry.X509Cert.Subject.CommonName]; !seen && parsedEntry.X509Cert.Subject.CommonName != "" {
+					fmt.Println(parsedEntry.X509Cert.Subject.CommonName)
+					r.seenDomains[parsedEntry.X509Cert.Subject.CommonName] = true
+					printed = true
+				}
 				for _, domain := range parsedEntry.X509Cert.DNSNames {
-					fmt.Println(domain)
+					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
+						printed = true
+					}
+				}
+				if !printed && r.options.Verbose {
+					fmt.Fprintf(os.Stderr, "No new domains found for cert at index %d\n", entry.Index)
 				}
 			}
 		} else {
@@ -304,12 +320,23 @@ func (r *Runner) logCertInfo(entry *ct.RawLogEntry) {
 				}
 			} else {
 				if utils.IsSubdomain(parsedEntry.X509Cert.Subject.CommonName, r.rootDomains) {
-					fmt.Println(parsedEntry.X509Cert.Subject.CommonName)
+					if _, seen := r.seenDomains[parsedEntry.X509Cert.Subject.CommonName]; !seen && parsedEntry.X509Cert.Subject.CommonName != "" {
+						fmt.Println(parsedEntry.X509Cert.Subject.CommonName)
+						r.seenDomains[parsedEntry.X509Cert.Subject.CommonName] = true
+						printed = true
+					}
 				}
 				for _, domain := range parsedEntry.X509Cert.DNSNames {
 					if utils.IsSubdomain(domain, r.rootDomains) {
-						fmt.Println(domain)
+						if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+							fmt.Println(domain)
+							r.seenDomains[domain] = true
+							printed = true
+						}
 					}
+				}
+				if !printed && r.options.Verbose {
+					fmt.Fprintf(os.Stderr, "No new domains found for cert at index %d\n", entry.Index)
 				}
 			}
 		}
@@ -321,13 +348,25 @@ func (r *Runner) logPrecertInfo(entry *ct.RawLogEntry) {
 	if x509.IsFatal(err) || parsedEntry.Precert == nil {
 		log.Printf("Process precert at index %d: <unparsed: %v>", entry.Index, err)
 	} else {
+		printed := false
 		if len(r.rootDomains) == 0 {
 			if r.options.JsonOutput {
 				utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
 			} else {
-				fmt.Println(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
+				if _, seen := r.seenDomains[parsedEntry.Precert.TBSCertificate.Subject.CommonName]; !seen && parsedEntry.Precert.TBSCertificate.Subject.CommonName != "" {
+					fmt.Println(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
+					r.seenDomains[parsedEntry.Precert.TBSCertificate.Subject.CommonName] = true
+					printed = true
+				}
 				for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
-					fmt.Println(domain)
+					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
+						printed = true
+					}
+				}
+				if !printed && r.options.Verbose {
+					fmt.Fprintf(os.Stderr, "No new domains found for precert at index %d\n", entry.Index)
 				}
 			}
 		} else {
@@ -344,12 +383,23 @@ func (r *Runner) logPrecertInfo(entry *ct.RawLogEntry) {
 				}
 			} else {
 				if utils.IsSubdomain(parsedEntry.Precert.TBSCertificate.Subject.CommonName, r.rootDomains) {
-					fmt.Println(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
+					if _, seen := r.seenDomains[parsedEntry.Precert.TBSCertificate.Subject.CommonName]; !seen && parsedEntry.Precert.TBSCertificate.Subject.CommonName != "" {
+						fmt.Println(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
+						r.seenDomains[parsedEntry.Precert.TBSCertificate.Subject.CommonName] = true
+						printed = true
+					}
 				}
 				for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
 					if utils.IsSubdomain(domain, r.rootDomains) {
-						fmt.Println(domain)
+						if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+							fmt.Println(domain)
+							r.seenDomains[domain] = true
+							printed = true
+						}
 					}
+				}
+				if (!printed) && r.options.Verbose {
+					fmt.Fprintf(os.Stderr, "No new domains found for precert at index %d\n", entry.Index)
 				}
 			}
 		}
