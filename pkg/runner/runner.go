@@ -280,6 +280,12 @@ func (r *Runner) processEntries(results *ct.GetEntriesResponse, start int64) {
 	}
 }
 
+func stripWildcard(domain string) string {
+	if strings.HasPrefix(domain, "*.") {
+		return domain[2:]
+	}
+	return domain
+}
 func (r *Runner) logCertInfo(entry *ct.RawLogEntry) {
 	parsedEntry, err := entry.ToLogEntry()
 	if x509.IsFatal(err) || parsedEntry.X509Cert == nil {
@@ -290,12 +296,16 @@ func (r *Runner) logCertInfo(entry *ct.RawLogEntry) {
 			if r.options.JsonOutput {
 				utils.JsonOutput(parsedEntry.X509Cert)
 			} else {
-				if _, seen := r.seenDomains[parsedEntry.X509Cert.Subject.CommonName]; !seen && parsedEntry.X509Cert.Subject.CommonName != "" {
-					fmt.Println(parsedEntry.X509Cert.Subject.CommonName)
-					r.seenDomains[parsedEntry.X509Cert.Subject.CommonName] = true
-					printed = true
+				if len(parsedEntry.X509Cert.Subject.CommonName) > 0 {
+					domain := stripWildcard(parsedEntry.X509Cert.Subject.CommonName)
+					if _, seen := r.seenDomains[domain]; !seen {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
+						printed = true
+					}
 				}
 				for _, domain := range parsedEntry.X509Cert.DNSNames {
+					domain = stripWildcard(domain)
 					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
 						fmt.Println(domain)
 						r.seenDomains[domain] = true
@@ -308,26 +318,27 @@ func (r *Runner) logCertInfo(entry *ct.RawLogEntry) {
 			}
 		} else {
 			if r.options.JsonOutput {
-				if utils.IsSubdomain(parsedEntry.X509Cert.Subject.CommonName, r.rootDomains) {
+				if utils.IsSubdomain(stripWildcard(parsedEntry.X509Cert.Subject.CommonName), r.rootDomains) {
 					utils.JsonOutput(parsedEntry.X509Cert)
 					return
 				}
 				for _, domain := range parsedEntry.X509Cert.DNSNames {
-					if utils.IsSubdomain(domain, r.rootDomains) {
+					if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
 						utils.JsonOutput(parsedEntry.X509Cert)
 						break
 					}
 				}
 			} else {
-				if utils.IsSubdomain(parsedEntry.X509Cert.Subject.CommonName, r.rootDomains) {
-					if _, seen := r.seenDomains[parsedEntry.X509Cert.Subject.CommonName]; !seen && parsedEntry.X509Cert.Subject.CommonName != "" {
-						fmt.Println(parsedEntry.X509Cert.Subject.CommonName)
-						r.seenDomains[parsedEntry.X509Cert.Subject.CommonName] = true
+				if utils.IsSubdomain(stripWildcard(parsedEntry.X509Cert.Subject.CommonName), r.rootDomains) {
+					domain := stripWildcard(parsedEntry.X509Cert.Subject.CommonName)
+					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
 						printed = true
 					}
 				}
 				for _, domain := range parsedEntry.X509Cert.DNSNames {
-					if utils.IsSubdomain(domain, r.rootDomains) {
+					if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
 						if _, seen := r.seenDomains[domain]; !seen && domain != "" {
 							fmt.Println(domain)
 							r.seenDomains[domain] = true
@@ -353,12 +364,16 @@ func (r *Runner) logPrecertInfo(entry *ct.RawLogEntry) {
 			if r.options.JsonOutput {
 				utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
 			} else {
-				if _, seen := r.seenDomains[parsedEntry.Precert.TBSCertificate.Subject.CommonName]; !seen && parsedEntry.Precert.TBSCertificate.Subject.CommonName != "" {
-					fmt.Println(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
-					r.seenDomains[parsedEntry.Precert.TBSCertificate.Subject.CommonName] = true
-					printed = true
+				if len(parsedEntry.Precert.TBSCertificate.Subject.CommonName) > 0 {
+					domain := stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
+					if _, seen := r.seenDomains[domain]; !seen {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
+						printed = true
+					}
 				}
 				for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
+					domain = stripWildcard(domain)
 					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
 						fmt.Println(domain)
 						r.seenDomains[domain] = true
@@ -371,26 +386,27 @@ func (r *Runner) logPrecertInfo(entry *ct.RawLogEntry) {
 			}
 		} else {
 			if r.options.JsonOutput {
-				if utils.IsSubdomain(parsedEntry.Precert.TBSCertificate.Subject.CommonName, r.rootDomains) {
+				if utils.IsSubdomain(stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName), r.rootDomains) {
 					utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
 					return
 				}
 				for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
-					if utils.IsSubdomain(domain, r.rootDomains) {
+					if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
 						utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
 						break
 					}
 				}
 			} else {
-				if utils.IsSubdomain(parsedEntry.Precert.TBSCertificate.Subject.CommonName, r.rootDomains) {
-					if _, seen := r.seenDomains[parsedEntry.Precert.TBSCertificate.Subject.CommonName]; !seen && parsedEntry.Precert.TBSCertificate.Subject.CommonName != "" {
-						fmt.Println(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
-						r.seenDomains[parsedEntry.Precert.TBSCertificate.Subject.CommonName] = true
+				if utils.IsSubdomain(stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName), r.rootDomains) {
+					domain := stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
+					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
 						printed = true
 					}
 				}
 				for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
-					if utils.IsSubdomain(domain, r.rootDomains) {
+					if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
 						if _, seen := r.seenDomains[domain]; !seen && domain != "" {
 							fmt.Println(domain)
 							r.seenDomains[domain] = true
@@ -398,7 +414,7 @@ func (r *Runner) logPrecertInfo(entry *ct.RawLogEntry) {
 						}
 					}
 				}
-				if (!printed) && r.options.Verbose {
+				if !printed && r.options.Verbose {
 					fmt.Fprintf(os.Stderr, "No new domains found for precert at index %d\n", entry.Index)
 				}
 			}
