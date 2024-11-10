@@ -5,8 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -22,12 +20,6 @@ import (
 
 var (
 	logListUrl = "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
-	maxRetries = 3
-	dnsServers = []string{
-		"8.8.8.8:53",   // Google DNS
-		"1.1.1.1:53",   // Cloudflare DNS
-		"9.9.9.9:53",   // Quad9 DNS
-	}
 )
 
 type Runner struct {
@@ -36,102 +28,40 @@ type Runner struct {
 	rootDomains    map[string]bool
 	rateLimitMap   map[string]time.Duration
 	entryTasksChan chan types.EntryTask
-	seenDomains    map[string]bool
-	httpClient     *http.Client
-}
-
-func createHTTPClient() *http.Client {
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Try default DNS first
-			conn, err := dialer.DialContext(ctx, network, addr)
-			if err == nil {
-				return conn, nil
-			}
-
-			// If default DNS fails, try fallback DNS servers
-			for _, dnsServer := range dnsServers {
-				resolver := &net.Resolver{
-					PreferGo: true,
-					Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-						return dialer.DialContext(ctx, network, dnsServer)
-					},
-				}
-
-				addrs, err := resolver.LookupHost(ctx, strings.Split(addr, ":")[0])
-				if err != nil {
-					continue
-				}
-
-				if len(addrs) > 0 {
-					return dialer.DialContext(ctx, network, addrs[0]+":"+strings.Split(addr, ":")[1])
-				}
-			}
-			return nil, fmt.Errorf("all DNS resolvers failed")
-		},
-		MaxIdleConns:        100,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
-		TLSHandshakeTimeout: 30 * time.Second,
-	}
-
-	return &http.Client{
-		Transport: transport,
-		Timeout:   60 * time.Second,
-	}
-}
-
-func withRetry(operation func() error) error {
-	var err error
-	for i := 0; i < maxRetries; i++ {
-		err = operation()
-		if err == nil {
-			return nil
-		}
-		if i < maxRetries-1 {
-			backoffDuration := time.Duration(1<<uint(i)) * time.Second
-			time.Sleep(backoffDuration)
-		}
-	}
-	return fmt.Errorf("operation failed after %d retries: %v", maxRetries, err)
+	seenDomains    map[string]bool // Added seenDomains map
 }
 
 func NewRunner(options *Options) (*Runner, error) {
+	var err error
 	runner := &Runner{
 		options:     options,
 		rootDomains: map[string]bool{},
-		seenDomains: map[string]bool{},
-		httpClient:  createHTTPClient(),
+		seenDomains: map[string]bool{}, // Initialize seenDomains
 	}
 
-	// Load root domains with error handling
+	// Load root domains if any
 	if runner.options.RootList != "" {
-		err := withRetry(func() error {
-			return runner.loadRootDomains()
-		})
+		file, err := os.Open(runner.options.RootList)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load root domains: %v", err)
+			panic(err)
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			runner.rootDomains[scanner.Text()] = true
 		}
 	}
 
-	// Collect CT Logs with retry
-	var err error
-	err = withRetry(func() error {
-		var loadErr error
-		runner.logClients, loadErr = utils.PopulateLogs(logListUrl)
-		return loadErr
-	})
+	// Collect CT Logs
+	runner.logClients, err = utils.PopulateLogs(logListUrl)
 	if err != nil {
-		return nil, fmt.Errorf("failed to populate logs after retries: %v", err)
+		panic(err)
 	}
 
 	runner.entryTasksChan = make(chan types.EntryTask, len(runner.logClients)*100)
 
+	// Set rate limit map based on the new argument
 	rateLimit := time.Duration(options.RateLimit) * time.Second
 	runner.rateLimitMap = map[string]time.Duration{
 		"Google":        rateLimit,
@@ -144,33 +74,6 @@ func NewRunner(options *Options) (*Runner, error) {
 	return runner, nil
 }
 
-func (r *Runner) loadRootDomains() error {
-	file, err := os.Open(r.options.RootList)
-	if err != nil {
-		return fmt.Errorf("failed to open root list file: %v", err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	// Increase scanner buffer size for large files
-	const maxCapacity = 1024 * 1024 // 1MB
-	buf := make([]byte, maxCapacity)
-	scanner.Buffer(buf, maxCapacity)
-
-	for scanner.Scan() {
-		domain := strings.TrimSpace(scanner.Text())
-		if domain != "" {
-			r.rootDomains[domain] = true
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading root list file: %v", err)
-	}
-
-	return nil
-}
-
 func (r *Runner) Run() {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
@@ -180,7 +83,7 @@ func (r *Runner) Run() {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-signals
-		fmt.Fprintf(os.Stderr, "Shutdown signal received\n")
+		fmt.Fprintf(os.Stderr, "Shutdown signal received")
 		cancel() // Cancel the context
 	}()
 
@@ -190,7 +93,7 @@ func (r *Runner) Run() {
 		concurrency = 1
 	}
 	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
+		wg.Add(1) // Don't forget to add to the WaitGroup for each worker
 		go func() {
 			defer wg.Done()
 			r.entryWorker(ctx)
@@ -203,9 +106,9 @@ func (r *Runner) Run() {
 		go r.scanLog(ctx, ctl, &wg)
 	}
 
-	wg.Wait()
-	close(r.entryTasksChan)
-	fmt.Fprintf(os.Stderr, "Gracefully shutdown all routines\n")
+	wg.Wait()               // Wait for all goroutines to finish
+	close(r.entryTasksChan) // Close the channel after all tasks are complete
+	fmt.Fprintf(os.Stderr, "Gracefully shutdown all routines")
 }
 
 func (r *Runner) entryWorker(ctx context.Context) {
@@ -213,11 +116,11 @@ func (r *Runner) entryWorker(ctx context.Context) {
 		select {
 		case task, ok := <-r.entryTasksChan:
 			if !ok {
-				return
+				return // Channel closed, terminate the goroutine
 			}
 			r.processEntries(task.Entries, task.Index)
 		case <-ctx.Done():
-			return
+			return // Context cancelled, terminate the goroutine
 		}
 	}
 }
@@ -225,7 +128,7 @@ func (r *Runner) entryWorker(ctx context.Context) {
 func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	tickerDuration := time.Duration(1 * time.Second)
+	tickerDuration := time.Duration(1 * time.Second) // Default duration
 	for key := range r.rateLimitMap {
 		if strings.Contains(ctl.Name, key) {
 			tickerDuration = r.rateLimitMap[key]
@@ -233,6 +136,7 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 		}
 	}
 
+	// Is this a Google log?
 	IsGoogleLog := strings.Contains(ctl.Name, "Google")
 
 	ticker := time.NewTicker(tickerDuration)
@@ -241,9 +145,8 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 	var start, end int64
 	var err error
 
-	// Retry fetching the initial STH with exponential backoff
-	retryBackoff := 1
-	for retries := 0; retries < maxRetries; retries++ {
+	// Retry fetching the initial STH with context-aware back-off
+	for retries := 0; retries < 3; retries++ {
 		if err = r.fetchAndUpdateSTH(ctx, ctl, &end); err != nil {
 			if r.options.Verbose {
 				fmt.Fprintf(os.Stderr, "Retry %d: Failed to get initial STH for log %s: %v\n", retries+1, ctl.Client.BaseURI(), err)
@@ -251,8 +154,7 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Duration(retryBackoff) * time.Second):
-				retryBackoff *= 2
+			case <-time.After(60 * time.Second): // Wait with context awareness
 				continue
 			}
 		}
@@ -271,6 +173,11 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 					if r.options.Verbose {
 						fmt.Fprintf(os.Stderr, "Failed to update STH: %v\n", err)
 					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(60 * time.Second): // Wait with context awareness
+					}
 					continue
 				}
 				if r.options.Debug {
@@ -281,6 +188,7 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 				continue
 			}
 
+			// Work with Google logs
 			if IsGoogleLog {
 				for start < end {
 					batchEnd := start + 32
@@ -290,9 +198,14 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 					entries, err := ctl.Client.GetRawEntries(ctx, start, batchEnd)
 					if err != nil {
 						if r.options.Verbose {
-							fmt.Fprintf(os.Stderr, "Error fetching entries for %s: %v\n", ctl.Name, err)
+							fmt.Fprintf(os.Stderr, "Error fetching entries for %s: %v", ctl.Name, err)
 						}
-						break
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(30 * time.Second): // Wait with context awareness
+						}
+						break // Break this loop on error, wait for the next ticker tick.
 					}
 
 					if len(entries.Entries) > 0 {
@@ -302,14 +215,20 @@ func (r *Runner) scanLog(ctx context.Context, ctl types.CtLog, wg *sync.WaitGrou
 						}
 						start += int64(len(entries.Entries))
 					} else {
-						break
+						break // No more entries to process, break the loop.
 					}
 				}
-			} else {
+				continue // Continue with the outer loop.
+			} else { // Non-Google handler
 				entries, err := ctl.Client.GetRawEntries(ctx, start, end)
 				if err != nil {
 					if r.options.Verbose {
-						fmt.Fprintf(os.Stderr, "Error fetching entries for %s: %v\n", ctl.Name, err)
+						fmt.Fprintf(os.Stderr, "Error fetching entries for %s: %v", ctl.Name, err)
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(60 * time.Second): // Wait with context awareness
 					}
 					continue
 				}
@@ -335,13 +254,6 @@ func (r *Runner) fetchAndUpdateSTH(ctx context.Context, ctl types.CtLog, end *in
 	return nil
 }
 
-func stripWildcard(domain string) string {
-	if strings.HasPrefix(domain, "*.") {
-		return domain[2:]
-	}
-	return domain
-}
-
 func (r *Runner) processEntries(results *ct.GetEntriesResponse, start int64) {
 	index := start
 
@@ -350,9 +262,9 @@ func (r *Runner) processEntries(results *ct.GetEntriesResponse, start int64) {
 		rle, err := ct.RawLogEntryFromLeaf(index, &entry)
 		if err != nil {
 			if r.options.Verbose {
-				fmt.Fprintf(os.Stderr, "Failed to parse entry %d: %v\n", index, err)
+				fmt.Fprintf(os.Stderr, "Failed to get parse entry %d: %v", index, err)
 			}
-			continue
+			break
 		}
 
 		switch entryType := rle.Leaf.TimestampedEntry.EntryType; entryType {
@@ -362,158 +274,150 @@ func (r *Runner) processEntries(results *ct.GetEntriesResponse, start int64) {
 			r.logPrecertInfo(rle)
 		default:
 			if r.options.Verbose {
-				fmt.Fprintf(os.Stderr, "Unknown entry type at index %d\n", index)
+				fmt.Fprintln(os.Stderr, "Unknown entry")
 			}
 		}
 	}
 }
 
+func stripWildcard(domain string) string {
+	if strings.HasPrefix(domain, "*.") {
+		return domain[2:]
+	}
+	return domain
+}
 func (r *Runner) logCertInfo(entry *ct.RawLogEntry) {
 	parsedEntry, err := entry.ToLogEntry()
 	if x509.IsFatal(err) || parsedEntry.X509Cert == nil {
-		if r.options.Verbose {
-			log.Printf("Process cert at index %d: <unparsed: %v>", entry.Index, err)
-		}
-		return
-	}
-
-	printed := false
-	if len(r.rootDomains) == 0 {
-		if r.options.JsonOutput {
-			utils.JsonOutput(parsedEntry.X509Cert)
-		} else {
-			if len(parsedEntry.X509Cert.Subject.CommonName) > 0 {
-				domain := stripWildcard(parsedEntry.X509Cert.Subject.CommonName)
-				if _, seen := r.seenDomains[domain]; !seen && domain != "" {
-					fmt.Println(domain)
-					r.seenDomains[domain] = true
-					printed = true
-				}
-			}
-			for _, domain := range parsedEntry.X509Cert.DNSNames {
-				domain = stripWildcard(domain)
-				if _, seen := r.seenDomains[domain]; !seen && domain != "" {
-					fmt.Println(domain)
-					r.seenDomains[domain] = true
-					printed = true
-				}
-			}
-		}
+		log.Printf("Process cert at index %d: <unparsed: %v>", entry.Index, err)
 	} else {
-		if r.options.JsonOutput {
-			if utils.IsSubdomain(stripWildcard(parsedEntry.X509Cert.Subject.CommonName), r.rootDomains) {
+		printed := false
+		if len(r.rootDomains) == 0 {
+			if r.options.JsonOutput {
 				utils.JsonOutput(parsedEntry.X509Cert)
-				return
-			}
-			for _, domain := range parsedEntry.X509Cert.DNSNames {
-				if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
-					utils.JsonOutput(parsedEntry.X509Cert)
-					break
+			} else {
+				if len(parsedEntry.X509Cert.Subject.CommonName) > 0 {
+					domain := stripWildcard(parsedEntry.X509Cert.Subject.CommonName)
+					if _, seen := r.seenDomains[domain]; !seen {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
+						printed = true
+					}
 				}
-			}
-		} else {
-			if utils.IsSubdomain(stripWildcard(parsedEntry.X509Cert.Subject.CommonName), r.rootDomains) {
-				domain := stripWildcard(parsedEntry.X509Cert.Subject.CommonName)
-				if _, seen := r.seenDomains[domain]; !seen && domain != "" {
-					fmt.Println(domain)
-					r.seenDomains[domain] = true
-					printed = true
-				}
-			}
-			for _, domain := range parsedEntry.X509Cert.DNSNames {
-				domain = stripWildcard(domain)
-				if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
+				for _, domain := range parsedEntry.X509Cert.DNSNames {
+					domain = stripWildcard(domain)
 					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
 						fmt.Println(domain)
 						r.seenDomains[domain] = true
 						printed = true
 					}
 				}
+				if !printed && r.options.Verbose {
+					fmt.Fprintf(os.Stderr, "No new domains found for cert at index %d\n", entry.Index)
+				}
+			}
+		} else {
+			if r.options.JsonOutput {
+				if utils.IsSubdomain(stripWildcard(parsedEntry.X509Cert.Subject.CommonName), r.rootDomains) {
+					utils.JsonOutput(parsedEntry.X509Cert)
+					return
+				}
+				for _, domain := range parsedEntry.X509Cert.DNSNames {
+					if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
+						utils.JsonOutput(parsedEntry.X509Cert)
+						break
+					}
+				}
+			} else {
+				if utils.IsSubdomain(stripWildcard(parsedEntry.X509Cert.Subject.CommonName), r.rootDomains) {
+					domain := stripWildcard(parsedEntry.X509Cert.Subject.CommonName)
+					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
+						printed = true
+					}
+				}
+				for _, domain := range parsedEntry.X509Cert.DNSNames {
+					if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
+						if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+							fmt.Println(domain)
+							r.seenDomains[domain] = true
+							printed = true
+						}
+					}
+				}
+				if !printed && r.options.Verbose {
+					fmt.Fprintf(os.Stderr, "No new domains found for cert at index %d\n", entry.Index)
+				}
 			}
 		}
 	}
-
-if !printed && r.options.Verbose {
-			fmt.Fprintf(os.Stderr, "No new domains found for cert at index %d\n", entry.Index)
-		}
 }
 
 func (r *Runner) logPrecertInfo(entry *ct.RawLogEntry) {
 	parsedEntry, err := entry.ToLogEntry()
 	if x509.IsFatal(err) || parsedEntry.Precert == nil {
-		if r.options.Verbose {
-			log.Printf("Process precert at index %d: <unparsed: %v>", entry.Index, err)
-		}
-		return
-	}
-
-	printed := false
-	if len(r.rootDomains) == 0 {
-		if r.options.JsonOutput {
-			utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
-		} else {
-			if len(parsedEntry.Precert.TBSCertificate.Subject.CommonName) > 0 {
-				domain := stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
-				if _, seen := r.seenDomains[domain]; !seen && domain != "" {
-					fmt.Println(domain)
-					r.seenDomains[domain] = true
-					printed = true
-				}
-			}
-			for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
-				domain = stripWildcard(domain)
-				if _, seen := r.seenDomains[domain]; !seen && domain != "" {
-					fmt.Println(domain)
-					r.seenDomains[domain] = true
-					printed = true
-				}
-			}
-		}
+		log.Printf("Process precert at index %d: <unparsed: %v>", entry.Index, err)
 	} else {
-		if r.options.JsonOutput {
-			if utils.IsSubdomain(stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName), r.rootDomains) {
+		printed := false
+		if len(r.rootDomains) == 0 {
+			if r.options.JsonOutput {
 				utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
-				return
-			}
-			for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
-				if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
-					utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
-					break
+			} else {
+				if len(parsedEntry.Precert.TBSCertificate.Subject.CommonName) > 0 {
+					domain := stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
+					if _, seen := r.seenDomains[domain]; !seen {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
+						printed = true
+					}
 				}
-			}
-		} else {
-			if utils.IsSubdomain(stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName), r.rootDomains) {
-				domain := stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
-				if _, seen := r.seenDomains[domain]; !seen && domain != "" {
-					fmt.Println(domain)
-					r.seenDomains[domain] = true
-					printed = true
-				}
-			}
-			for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
-				domain = stripWildcard(domain)
-				if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
+				for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
+					domain = stripWildcard(domain)
 					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
 						fmt.Println(domain)
 						r.seenDomains[domain] = true
 						printed = true
 					}
 				}
+				if !printed && r.options.Verbose {
+					fmt.Fprintf(os.Stderr, "No new domains found for precert at index %d\n", entry.Index)
+				}
+			}
+		} else {
+			if r.options.JsonOutput {
+				if utils.IsSubdomain(stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName), r.rootDomains) {
+					utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
+					return
+				}
+				for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
+					if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
+						utils.JsonOutput(parsedEntry.Precert.TBSCertificate)
+						break
+					}
+				}
+			} else {
+				if utils.IsSubdomain(stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName), r.rootDomains) {
+					domain := stripWildcard(parsedEntry.Precert.TBSCertificate.Subject.CommonName)
+					if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+						fmt.Println(domain)
+						r.seenDomains[domain] = true
+						printed = true
+					}
+				}
+				for _, domain := range parsedEntry.Precert.TBSCertificate.DNSNames {
+					if utils.IsSubdomain(stripWildcard(domain), r.rootDomains) {
+						if _, seen := r.seenDomains[domain]; !seen && domain != "" {
+							fmt.Println(domain)
+							r.seenDomains[domain] = true
+							printed = true
+						}
+					}
+				}
+				if !printed && r.options.Verbose {
+					fmt.Fprintf(os.Stderr, "No new domains found for precert at index %d\n", entry.Index)
+				}
 			}
 		}
 	}
-
-	if !printed && r.options.Verbose {
-		fmt.Fprintf(os.Stderr, "No new domains found for precert at index %d\n", entry.Index)
-	}
 }
-//
-//// Options holds the configuration for the Runner
-//type Options struct {
-//	RootList    string
-//	Concurrency int
-//	RateLimit   int
-//	JsonOutput  bool
-//	Verbose     bool
-//	Debug       bool
-//}
